@@ -1,0 +1,550 @@
+#针对十字柱的优化流程.圆形牵涉到FDTD对圆画网格好麻烦。
+#命名方式：中心位置的10^15。符号代表横竖
+#正向仿真部分：
+iii=1;
+#z00=zeros(1,iii);#存z最大值矩阵
+y00=zeros(3,iii,3);#最后一个维度配合j
+
+lamb=[5,4,3];#多色优化
+lambda=lamb*10^(-6);
+
+m=80;#本局常量
+m_5um = zeros(m,m,2);#优化器用的矩阵,直到...
+v_5um = zeros(m,m,2);#
+
+m_4um = zeros(m,m,2);#
+v_4um = zeros(m,m,2);#
+
+m_3um = zeros(m,m,2);#
+v_3um = zeros(m,m,2);#
+
+mhat_5um = zeros(m,m,2);#
+vhat_5um = zeros(m,m,2);#
+delta_5um = zeros(m,m,2);#
+
+mhat_4um = zeros(m,m,2);#
+vhat_4um = zeros(m,m,2);#
+delta_4um = zeros(m,m,2);#
+
+mhat_3um = zeros(m,m,2);#
+vhat_3um = zeros(m,m,2);#
+delta_3um = zeros(m,m,2);#
+
+delta_total = zeros(m,m,2);#...直到这里
+
+for (i0=1:iii){
+result=cell(3);#存放多色F偏导A5矩阵的元胞数组
+resu=zeros(1,3);#存放F复数的矩阵
+for (j=1:3){#多色循环
+switchtolayout;#启用正向模拟的平面波源
+select("source_"+num2str(j));
+set("enabled",1);
+select('FDTD');
+run;
+###################################################z=140um处光强绝对值
+farfieldsettings("override near field mesh",true);
+farfieldsettings("near field samples per wavelength",2); # at Nyquist limit,至少两倍采样频率
+
+# choose area to plot and spatial resolution
+z = linspace(120e-6,150e-6,80);
+
+# farfield along z axis
+E2_z = farfieldexact3d('monitor',0,0,z);#把监视器投影到后三个向量指定的区域点空间处.这里只看z轴
+#farfieldexact3d只返回电场值
+E2_z = pinch(sum(abs(E2_z)^2,4));#对第4维度求平方和，即现在其实是E的模方
+ind=round((140-120)/(150-120)*80);#换成手动指定z=140处的索引
+E140 = E2_z(ind);
+#在固定记录点的场强
+y00(1,i0,j)=E140;
+
+ind1=round((125-120)/(150-120)*80);#换成手动指定z=75处的索引
+E125 = E2_z(ind1);
+y00(2,i0,j)=E125;
+###################################################
+E_f=getresult('ka area','E');#收集正向时ka区域的电场数据
+Ex_f = pinch(E_f.Ex);
+Ey_f = pinch(E_f.Ey);
+Ez_f = pinch(E_f.Ez);
+x_f = pinch(E_f.x);
+y_f = pinch(E_f.y);
+z_f = pinch(E_f.z);
+
+E_ff=getresult('monitor','E');
+Ex_ff = pinch(E_ff.Ex);
+Ey_ff = pinch(E_ff.Ey);
+Ez_ff = pinch(E_ff.Ez);
+x_ff = pinch(E_ff.x);
+y_ff = pinch(E_ff.y);
+z_ff = pinch(E_ff.z);
+
+index = getresult('index monitor','index');#收集折射率数据。有必要吗？
+index_value = pinch(index.index_x);
+n=max(index_value);#简化的折射率提取
+#index_x = pinch(index.x);
+#index_y = pinch(index.y);
+#index_z = pinch(index.z);
+
+#切换为伴随仿真
+switchtolayout;#启用伴随模拟的平面波源
+select("source_"+num2str(j));
+set("enabled",0);
+select("adjoint source_"+num2str(j));
+set("enabled",1);
+select('FDTD');
+run;
+
+E_adj=getresult('ka area','E');#收集伴随仿真的ka区域电场
+Ex_adj=pinch(E_adj.Ex);
+Ey_adj=pinch(E_adj.Ey);
+Ez_adj=pinch(E_adj.Ez);
+x_adj=pinch(E_adj.x);
+y_adj=pinch(E_adj.y);
+z_adj=pinch(E_adj.z);
+
+E_d=getresult("monitor",'E');
+Ex_d=pinch(E_d.Ex);
+Ey_d=pinch(E_d.Ey);
+Ez_d=pinch(E_d.Ez);
+
+#下面处理两次仿真收集到的数据
+#要计算面积分。需求计算每格的面积，并与电场对应。
+#计算梯度矩阵时，w_i是这样的，即每个单元都有俩，一个是长度l1，一个是宽度l2。再按对称性部分简化。每个单元位置俩参数。
+dim0=size(Ex_f);
+dim=dim0(1,1);#所有场数据的离散数
+dimz=dim0(1,3);#z方向
+fdt=85e-6;#常用量：FDTD仿真区域的边长
+#a_mesh=fdt/282;#dim;#仿真区域的采样格长
+dA=85/dim*4.5/dimz;#积分用面积
+
+unitmesh=zeros(24,24,2);#维数肉眼确定。两层用来存放每个横竖单元表面的对应的网格的索引
+m=80;p=1.65e-6;#本局常量
+A1=zeros(m,m,3*4);#对长度参量存放待计算面相对位置索引的矩阵。每个面对应3层。此参数需求4个面
+A2=zeros(m,m,3*8);#对宽度，需求8个面
+A3=zeros(m,m,4);#将上面俩矩阵的数据每3层转化为一块积分量存放于这俩矩阵
+A4=zeros(m,m,8);
+um=1e-6;#有的地方用来这个，有的地方没用。还得注意点。
+
+for (i1=1:1:m){
+for (i2=1:1:m){
+    x=-m/2*p+(i1-0.5)*p;#中心位置
+    y=-m/2*p+(i2-0.5)*p;
+    if ((abs(x)<25*p)*(abs(y)<25*p)==1){
+    name=floor(10^15*(x^2+y^2));#最后一位计算居然有误差浮动，直接舍弃，前面至少4位数不重就行。
+    #dim=282;
+    #提取关键微米位置
+    x_min=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'x min');#提取嵌套的结构的属性
+    x_max=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'x max');#会警告有同名。不过返回的都是一个的数据，不影响
+    y_min=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'y min');#提供的是绝对坐标
+    y_max=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'y max');
+    xl=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'x span');#获取单元的x长度和y长度，即长度与宽度。记号为xl和yl。
+    yl=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'y span');
+    mid_coor_x=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'x');#中心x,y坐标
+    mid_coor_y=getnamed('structure group::'+num2str(name)+'_'+num2str(i1)+'_'+num2str(i2),'y');   
+    
+    #定义转换单位：格子/um
+    unit=dim/fdt;
+    
+    #获取12个端点的全局绝对坐标
+    x_1=x_min;
+    y_1=y_max;
+    
+    x_2=mid_coor_x-yl/2;
+    y_2=y_max;
+    
+    x_3=mid_coor_x-yl/2;
+    y_3=mid_coor_y+xl/2;
+    
+    x_4=mid_coor_x+yl/2;
+    y_4=mid_coor_y+xl/2;
+    
+    x_5=mid_coor_x+yl/2;
+    y_5=y_max;
+    
+    x_6=x_max;
+    y_6=y_max;
+    #对称
+    x_7=x_max;
+    y_7=y_min;
+    
+    x_8=mid_coor_x+yl/2;
+    y_8=y_min;
+    
+    x_9=mid_coor_x+yl/2;
+    y_9=mid_coor_y-xl/2;
+    
+    x_10=mid_coor_x-yl/2;
+    y_10=mid_coor_y-xl/2;
+    
+    x_11=mid_coor_x-yl/2;
+    y_11=y_min;
+    
+    x_12=x_min;
+    y_12=y_min;
+    
+    #转换为格子索引
+    x_1=floor(dim/2+x_1*unit);
+    x_2=floor(dim/2+x_2*unit);
+    x_3=floor(dim/2+x_3*unit);
+    x_4=floor(dim/2+x_4*unit);
+    x_5=floor(dim/2+x_5*unit);
+    x_6=floor(dim/2+x_6*unit);
+    x_7=floor(dim/2+x_7*unit);
+    x_8=floor(dim/2+x_8*unit);
+    x_9=floor(dim/2+x_9*unit);
+    x_10=floor(dim/2+x_10*unit);
+    x_11=floor(dim/2+x_11*unit);
+    x_12=floor(dim/2+x_12*unit); 
+    
+    y_1=floor(dim/2+y_1*unit);
+    y_2=floor(dim/2+y_2*unit);
+    y_3=floor(dim/2+y_3*unit);
+    y_4=floor(dim/2+y_4*unit);
+    y_5=floor(dim/2+y_5*unit);
+    y_6=floor(dim/2+y_6*unit);
+    y_7=floor(dim/2+y_7*unit);
+    y_8=floor(dim/2+y_8*unit);
+    y_9=floor(dim/2+y_9*unit);
+    y_10=floor(dim/2+y_10*unit);
+    y_11=floor(dim/2+y_11*unit);
+    y_12=floor(dim/2+y_12*unit);
+    
+    #针对两类参数，存放面数据到A1和A2里。每3层代表1个面。
+    A1(i1,i2,1)=y_1;
+    A1(i1,i2,2)=y_12;
+    A1(i1,i2,3)=x_1;
+    
+    A1(i1,i2,4)=x_3;
+    A1(i1,i2,5)=x_4;
+    A1(i1,i2,6)=y_3;
+    
+    A1(i1,i2,7)=y_1;
+    A1(i1,i2,8)=y_12;
+    A1(i1,i2,9)=x_6;
+    
+    A1(i1,i2,10)=x_3;
+    A1(i1,i2,11)=x_4;
+    A1(i1,i2,12)=y_10;
+    
+    
+    A2(i1,i2,1)=x_1;
+    A2(i1,i2,2)=x_2;
+    A2(i1,i2,3)=y_1;
+    
+    A2(i1,i2,4)=y_3;
+    A2(i1,i2,5)=y_2;
+    A2(i1,i2,6)=x_2;
+    
+    A2(i1,i2,7)=y_4;
+    A2(i1,i2,8)=y_5;
+    A2(i1,i2,9)=x_4;
+    
+    A2(i1,i2,10)=x_5;
+    A2(i1,i2,11)=x_6;
+    A2(i1,i2,12)=y_5;
+    
+    A2(i1,i2,13)=x_8;
+    A2(i1,i2,14)=x_7;
+    A2(i1,i2,15)=y_8;
+    
+    A2(i1,i2,16)=y_8;
+    A2(i1,i2,17)=y_9;
+    A2(i1,i2,18)=x_8;
+    
+    A2(i1,i2,19)=y_11;
+    A2(i1,i2,20)=y_10;
+    A2(i1,i2,21)=x_10;
+    
+    A2(i1,i2,22)=x_12;
+    A2(i1,i2,23)=x_11;
+    A2(i1,i2,24)=y_11;
+    
+    #准备计算每个面的积分值。这里分面处理而非按完整单元处理
+    #首先针对参数1来。E转换到D的系数，由于采取面外选择，且可忽略真空常数，空气折射率为1.故只考虑系数1/n_m^2即可
+    
+    #有一个可能的问题是我没有写多个循环，这使得后面可能调用的Ai矩阵都不是完整体。可能会出bug
+    
+    #第一、三面    
+    for (i3=A1(i1,i2,1):1:A1(i1,i2,2)){#代表y坐标。在两个对称面之间通用
+        A3(i1,i2,1)=A3(i1,i2,1)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A1(i1,i2,3),i3)*Ey_adj(A1(i1,i2,3),i3)+Ez_f(A1(i1,i2,3),i3)*Ez_adj(A1(i1,i2,3),i3)+1/(1*n^2)*Ex_f(A1(i1,i2,3),i3)*Ex_adj(A1(i1,i2,3),i3));#垂直分量是x
+        A3(i1,i2,3)=A3(i1,i2,3)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A1(i1,i2,9),i3)*Ey_adj(A1(i1,i2,9),i3)+Ez_f(A1(i1,i2,9),i3)*Ez_adj(A1(i1,i2,9),i3)+1/(1*n^2)*Ex_f(A1(i1,i2,9),i3)*Ex_adj(A1(i1,i2,9),i3));#垂直分量是x
+    }
+    #第二、四面
+    for (i4=A1(i1,i2,4):1:A1(i1,i2,5)){#代表x坐标。在两个对称面之间通用
+        A3(i1,i2,2)=A3(i1,i2,2)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i4,A1(i1,i2,6))*Ex_adj(i4,A1(i1,i2,6))+Ez_f(i4,A1(i1,i2,6))*Ez_adj(i4,A1(i1,i2,6))+1/(1*n^2)*Ey_f(i4,A1(i1,i2,6))*Ey_adj(i4,A1(i1,i2,6)));#垂直分量是y
+        A3(i1,i2,4)=A3(i1,i2,4)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i4,A1(i1,i2,12))*Ex_adj(i4,A1(i1,i2,12))+Ez_f(i4,A1(i1,i2,12))*Ez_adj(i4,A1(i1,i2,12))+1/(1*n^2)*Ey_f(i4,A1(i1,i2,12))*Ey_adj(i4,A1(i1,i2,12)));#垂直分量是y
+    }
+    #A3矩阵元已准备好
+    
+    #现在针对参数2来。
+    #第一、八面
+    for (i5=A2(i1,i2,1):1:A2(i1,i2,2)){#代表x坐标
+        A4(i1,i2,1)=A4(i1,i2,1)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i5,A2(i1,i2,3))*Ex_adj(i5,A2(i1,i2,3))+Ez_f(i5,A2(i1,i2,3))*Ez_adj(i5,A2(i1,i2,3))+1/(1*n^2)*Ey_f(i5,A2(i1,i2,3))*Ey_adj(i5,A2(i1,i2,3)));#y是垂直分量
+        A4(i1,i2,8)=A4(i1,i2,8)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i5,A2(i1,i2,24))*Ex_adj(i5,A2(i1,i2,24))+Ez_f(i5,A2(i1,i2,24))*Ez_adj(i5,A2(i1,i2,24))+1/(1*n^2)*Ey_f(i5,A2(i1,i2,24))*Ey_adj(i5,A2(i1,i2,24)));
+    }
+    
+    #第二、三面
+    for (i6=A2(i1,i2,4):1:A2(i1,i2,5)){#代表y坐标
+        A4(i1,i2,2)=A4(i1,i2,2)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A2(i1,i2,6),i6)*Ey_adj(A2(i1,i2,6),i6)+Ez_f(A2(i1,i2,6),i6)*Ez_adj(A2(i1,i2,6),i6)+1/(1*n^2)*Ex_f(A2(i1,i2,6),i6)*Ex_adj(A2(i1,i2,6),i6));#x是垂直量
+        A4(i1,i2,3)=A4(i1,i2,3)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A2(i1,i2,9),i6)*Ey_adj(A2(i1,i2,9),i6)+Ez_f(A2(i1,i2,9),i6)*Ez_adj(A2(i1,i2,9),i6)+1/(1*n^2)*Ex_f(A2(i1,i2,9),i6)*Ex_adj(A2(i1,i2,9),i6));#x是垂直量
+    }
+    
+    #第四、五面
+    for (i7=A2(i1,i2,10):1:A2(i1,i2,11)){#代表x坐标
+        A4(i1,i2,4)=A4(i1,i2,4)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i7,A2(i1,i2,12))*Ex_adj(i7,A2(i1,i2,12))+Ez_f(i7,A2(i1,i2,12))*Ez_adj(i7,A2(i1,i2,12))+1/(1*n^2)*Ey_f(i7,A2(i1,i2,12))*Ey_adj(i7,A2(i1,i2,12)));#y是垂直分量
+        A4(i1,i2,5)=A4(i1,i2,5)+1i*c/lambda(1,j)*(n^2-1)*(Ex_f(i7,A2(i1,i2,15))*Ex_adj(i7,A2(i1,i2,15))+Ez_f(i7,A2(i1,i2,15))*Ez_adj(i7,A2(i1,i2,15))+1/(1*n^2)*Ey_f(i7,A2(i1,i2,15))*Ey_adj(i7,A2(i1,i2,15)));
+    }
+    
+    #第六、七面
+    for (i8=A2(i1,i2,16):1:A2(i1,i2,17)){#代表y坐标
+        A4(i1,i2,6)=A4(i1,i2,6)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A2(i1,i2,18),i8)*Ey_adj(A2(i1,i2,18),i8)+Ez_f(A2(i1,i2,18),i8)*Ez_adj(A2(i1,i2,18),i8)+1/(1*n^2)*Ex_f(A2(i1,i2,18),i8)*Ex_adj(A2(i1,i2,18),i8));#x是垂直分量
+        A4(i1,i2,7)=A4(i1,i2,7)+1i*c/lambda(1,j)*(n^2-1)*(Ey_f(A2(i1,i2,21),i8)*Ey_adj(A2(i1,i2,21),i8)+Ez_f(A2(i1,i2,21),i8)*Ez_adj(A2(i1,i2,21),i8)+1/(1*n^2)*Ex_f(A2(i1,i2,21),i8)*Ex_adj(A2(i1,i2,21),i8));
+    }
+    
+    #A4矩阵元已准备好
+    }
+}
+}
+
+A5=zeros(m,m,3);#内重复含每个单元相关的梯度/偏导。第一层没有用了。
+s=1;#同类标记符
+#delta=1e-6;#步长
+
+for (i1=1:1:m){
+for (i2=1:1:m){
+    if (A3(i1,i2,1)==0){}
+    else{
+    x=-m/2*p+(i1-0.5)*p;#搜寻定位同类格子
+    y=-m/2*p+(i2-0.5)*p;
+    name=-floor(10^15*(x^2+y^2));#否则会把横竖的都搜进来。
+    selectpartial('structure group::'+num2str(name));
+    num=getnumber;
+    B1=zeros(2,num);#用于存放i1和i2  
+    
+    for (i3=1:1:num){#i3标记的是同距单元
+    xz0=get('name',i3);#字符型名称
+    l1=length(xz0);
+    l2=l1-4;#保留后5位
+    xz1=substring(xz0,l2);#后5位
+    xz2=substring(xz1,1,2);#i1
+    xz3=substring(xz1,4,2);#i2
+    B1(1,i3)=str2num(xz2);
+    B1(2,i3)=str2num(xz3);#已经将同距结构的矩阵坐标导入到B1里    
+    }
+    #if (A5(B1(1,i3),B1(2,i3),1)==0){}
+    #else{
+    #A5(B1(1,i3),B1(2,i3),1)=s;#未装填时装填同类标记。现在A5中i3标记的就是同类单元了
+    #s=s+1;#更新装填标记
+    #}
+    for (i3=1:1:num){ #指定要向同距单元中的第某个单元存放。 
+    for (i4=1:1:num){ #存放的数据是所有同距单元梯度和。
+    #问题是在i1和i2循环下，每次遇到同距，还要重复加。最后＋num次。于是给每次加的系数除以num
+    A5(B1(1,i3),B1(2,i3),2)=A5(B1(1,i3),B1(2,i3),2)+1/num*(A3(B1(1,i4),B1(2,i4),1)+A3(B1(1,i4),B1(2,i4),2)+A3(B1(1,i4),B1(2,i4),3)+A3(B1(1,i4),B1(2,i4),4));#同类中重复装填（指所有i4中）长度总梯度
+    A5(B1(1,i3),B1(2,i3),3)=A5(B1(1,i3),B1(2,i3),3)+1/num*(A4(B1(1,i4),B1(2,i4),1)+A4(B1(1,i4),B1(2,i4),2)+A4(B1(1,i4),B1(2,i4),3)+A4(B1(1,i4),B1(2,i4),4)+A4(B1(1,i4),B1(2,i4),5)+A4(B1(1,i4),B1(2,i4),6)+A4(B1(1,i4),B1(2,i4),7)+A4(B1(1,i4),B1(2,i4),8));#宽度总梯度
+    #A3和A4懒得压缩成1层了，一层一层加吧   
+    }
+    }
+    
+    
+    }
+}
+}  
+
+#A5即F的偏导矩阵。还要经过dA修正。A5第一层没用了。
+um=1e-6;
+for (i1=1:1:m){
+for (i2=1:1:m){
+A5(i1,i2,2)=A5(i1,i2,2)*dA*um^2;
+A5(i1,i2,3)=A5(i1,i2,3)*dA*um^2;
+}}
+
+result{j}=A5;#前三胞存放A5矩阵
+
+F=integrate(conj(Ex_d)*Ex_ff+conj(Ey_d)*Ey_ff+conj(Ez_d)*Ez_ff,1:2,x_ff,y_ff);
+resu(1,j)=F;#F复数存入resu矩阵
+
+switchtolayout;
+select("adjoint source_"+num2str(j));
+set("enabled",0);#确保单色循环内部结束时两个源都是关闭的。
+
+}#多色循环结束，得到的唯一结果就是元胞。
+
+#子偏导提取。A5矩阵存放F的偏导。
+A5_5um=result{1};
+A5_4um=result{2};
+A5_3um=result{3};
+
+F_5um=resu(1,1);
+F_4um=resu(1,2);
+F_3um=resu(1,3);
+
+A6_5um=2*real(conj(F_5um)*A5_5um);#A6系列是真正存放梯度的矩阵。m,m,3维度。第一层为空。
+A6_4um=2*real(conj(F_4um)*A5_4um);
+A6_3um=2*real(conj(F_3um)*A5_3um);
+
+ss=1;#三块一样的提取梯度abs平均值存到y00里
+al=0;
+for (i1=1:1:m){
+for (i2=1:1:m){
+al=al+abs(A6_5um(i1,i2,2))+abs(A6_5um(i1,i2,3));
+if(((A6_5um(i1,i2,2)==0)+(A6_5um(i1,i2,3)==0))==0){}
+else{ss=ss+1;}
+}}
+avg_gra_5um=al/ss;
+y00(3,i0,1)=avg_gra_5um;
+
+ss=1;
+al=0;
+for (i1=1:1:m){
+for (i2=1:1:m){
+al=al+abs(A6_4um(i1,i2,2))+abs(A6_4um(i1,i2,3));
+if(((A6_4um(i1,i2,2)==0)+(A6_4um(i1,i2,3)==0))==0){}
+else{ss=ss+1;}
+}}
+avg_gra_4um=al/ss;
+y00(3,i0,2)=avg_gra_4um;
+
+ss=1;
+al=0;
+for (i1=1:1:m){
+for (i2=1:1:m){
+al=al+abs(A6_3um(i1,i2,2))+abs(A6_3um(i1,i2,3));
+if(((A6_3um(i1,i2,2)==0)+(A6_3um(i1,i2,3)==0))==0){}
+else{ss=ss+1;}
+}}
+avg_gra_3um=al/ss;
+y00(3,i0,3)=avg_gra_3um;
+
+#下面为优化器部分。此版本使用Adam算法
+# ---------- Adam hyperparameters ----------
+beta1 = 0.9;
+beta2 = 0.999;
+epsilon = 1e-15;#说是远小于sqrt(v_hat)就行
+# learning rate
+alpha = 2e-9;#Adam步长式中的学习率因子，也是决定步长特征尺寸的核心
+
+# ---------- Initialize persistent Adam states ----------
+# IMPORTANT:
+# These four/six matrices must NOT be reinitialized
+# at every iteration.
+
+# ============================================================
+# 1. 5 um Adam
+# ============================================================
+for (q1=1:m){
+    for (q2=1:m){
+    m_5um(q1,q2,1) = beta1*m_5um(q1,q2,1) + (1-beta1)*A6_5um(q1,q2,2);#m_k=b1*m_(k-1)+(1-b1)g_k
+    v_5um(q1,q2,1) = beta2*v_5um(q1,q2,1) + (1-beta2)*(A6_5um(q1,q2,2)^2);
+    m_5um(q1,q2,2) = beta1*m_5um(q1,q2,2) + (1-beta1)*A6_5um(q1,q2,3);
+    v_5um(q1,q2,2) = beta2*v_5um(q1,q2,2) + (1-beta2)*(A6_5um(q1,q2,3)^2);
+    # 倾向correction
+    mhat_5um(q1,q2,1) = m_5um(q1,q2,1)/(1-beta1^i0);
+    mhat_5um(q1,q2,2) = m_5um(q1,q2,2)/(1-beta1^i0);
+    vhat_5um(q1,q2,1) = v_5um(q1,q2,1)/(1-beta2^i0);
+    vhat_5um(q1,q2,2) = v_5um(q1,q2,2)/(1-beta2^i0);
+    # Adam update
+    delta_5um(q1,q2,1) = alpha*mhat_5um(q1,q2,1)/(sqrt(vhat_5um(q1,q2,1))+epsilon);
+    delta_5um(q1,q2,2) = alpha*mhat_5um(q1,q2,2)/(sqrt(vhat_5um(q1,q2,2))+epsilon);
+    }
+}
+# ============================================================
+# 2. 4 um Adam
+# ============================================================
+for (q1=1:m){
+    for (q2=1:m){
+    m_4um(q1,q2,1) = beta1*m_4um(q1,q2,1) + (1-beta1)*A6_4um(q1,q2,2);#m_k=b1*m_(k-1)+(1-b1)g_k
+    v_4um(q1,q2,1) = beta2*v_4um(q1,q2,1) + (1-beta2)*(A6_4um(q1,q2,2)^2);
+    m_4um(q1,q2,2) = beta1*m_4um(q1,q2,2) + (1-beta1)*A6_4um(q1,q2,3);
+    v_4um(q1,q2,2) = beta2*v_4um(q1,q2,2) + (1-beta2)*(A6_4um(q1,q2,3)^2);
+    # 倾向correction
+    mhat_4um(q1,q2,1) = m_4um(q1,q2,1)/(1-beta1^i0);
+    mhat_4um(q1,q2,2) = m_4um(q1,q2,2)/(1-beta1^i0);
+    vhat_4um(q1,q2,1) = v_4um(q1,q2,1)/(1-beta2^i0);
+    vhat_4um(q1,q2,2) = v_4um(q1,q2,2)/(1-beta2^i0);
+    # Adam update
+    delta_4um(q1,q2,1) = alpha*mhat_4um(q1,q2,1)/(sqrt(vhat_4um(q1,q2,1))+epsilon);
+    delta_4um(q1,q2,2) = alpha*mhat_4um(q1,q2,2)/(sqrt(vhat_4um(q1,q2,2))+epsilon);
+    }
+}
+# ============================================================
+# 3. 3 um Adam
+# ============================================================
+
+for (q1=1:m){
+    for (q2=1:m){
+    m_3um(q1,q2,1) = beta1*m_3um(q1,q2,1) + (1-beta1)*A6_3um(q1,q2,2);#m_k=b1*m_(k-1)+(1-b1)g_k
+    v_3um(q1,q2,1) = beta2*v_3um(q1,q2,1) + (1-beta2)*(A6_3um(q1,q2,2)^2);
+    m_3um(q1,q2,2) = beta1*m_3um(q1,q2,2) + (1-beta1)*A6_3um(q1,q2,3);
+    v_3um(q1,q2,2) = beta2*v_3um(q1,q2,2) + (1-beta2)*(A6_3um(q1,q2,3)^2);
+    # 倾向correction
+    mhat_3um(q1,q2,1) = m_3um(q1,q2,1)/(1-beta1^i0);
+    mhat_3um(q1,q2,2) = m_3um(q1,q2,2)/(1-beta1^i0);
+    vhat_3um(q1,q2,1) = v_3um(q1,q2,1)/(1-beta2^i0);
+    vhat_3um(q1,q2,2) = v_3um(q1,q2,2)/(1-beta2^i0);
+    # Adam update
+    delta_3um(q1,q2,1) = alpha*mhat_3um(q1,q2,1)/(sqrt(vhat_3um(q1,q2,1))+epsilon);
+    delta_3um(q1,q2,2) = alpha*mhat_3um(q1,q2,2)/(sqrt(vhat_3um(q1,q2,2))+epsilon);
+    }
+}
+
+# ============================================================
+# 4. Combine the three wavelength updates
+# ============================================================
+
+delta_total = (delta_5um + delta_4um + delta_3um)/3;#合成给到步长这里
+
+# ============================================================
+# 5. Hard clipping: maximum absolute step = 15 nm
+# ============================================================
+
+max_step = 15e-9;#单次最大变化限制在15nm内
+
+for (q1=1:m){
+    for (q2=1:m){
+    if (delta_total(q1,q2,1) < -max_step)
+    {delta_total(q1,q2,1)= -max_step;}
+    if (delta_total(q1,q2,1) > max_step)
+    {delta_total(q1,q2,1)= max_step;}
+    
+    if (delta_total(q1,q2,2) < -max_step)
+    {delta_total(q1,q2,2)= -max_step;}
+    if (delta_total(q1,q2,2) > max_step)
+    {delta_total(q1,q2,2)= max_step;}
+    }
+}
+
+# ============================================================
+# 6. 步长阶梯化
+# Step resolution = 1 nm
+# ============================================================
+
+delta_total = round(delta_total/1e-9)*1e-9;#round就是取整到最近整数，即做了间隔为1nm的间隔化
+
+# ============================================================
+# 7. Output
+# ============================================================
+
+delta_p = delta_total;
+
+for (i1=1:1:m){
+for (i2=1:1:m){
+    x=-m/2*p+(i1-0.5)*p;#一个一个变动
+    y=-m/2*p+(i2-0.5)*p;
+    
+    if ((x^2+y^2)<=(41.5*um)^2){
+    name1=floor(10^15*(x^2+y^2));#横柱
+    select('structure group::'+num2str(name1)+'_'+num2str(i1)+'_'+num2str(i2));
+    xps1=get('x span');
+    yps1=get('y span');
+    set('x span',xps1+delta_p(i1,i2,1));#长变动 
+    set('y span',yps1+delta_p(i1,i2,2));#宽变动 
+    
+    name2=-name1;#竖柱
+    select('structure group::'+num2str(name2)+'_'+num2str(i1)+'_'+num2str(i2));
+    xps2=get('x span');
+    yps2=get('y span');
+    set('x span',xps2+delta_p(i1,i2,2));#长变动.此长为彼宽   
+    set('y span',yps2+delta_p(i1,i2,1));#宽变动.此宽为彼长 
+}
+}
+}
+}
